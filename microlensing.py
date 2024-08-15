@@ -82,7 +82,7 @@ class microlensing:
         t0_list, Imax_list = [], []
         for _ in range(iter):
             sample = data_cut.sample(n=len(data_cut), replace=True)
-            a, std_a, _ = msh.independent_meas_linear_fit(n_param=3, x=sample["JHD"]-min_range, y=sample["I"], y_error=sample["I_error"])
+            a, std_a, _, _ = msh.independent_meas_linear_fit(n_param=3, x=sample["JHD"]-min_range, y=sample["I"], y_error=sample["I_error"])
             t0_par, Imax_par = self._extract_parabolic_params(a, std_a, min_range)
             t0_list.append(t0_par.value)
             Imax_list.append(Imax_par.value)
