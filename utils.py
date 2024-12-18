@@ -34,7 +34,7 @@ class value_with_error:
         return str(self)
 
 
-########################################### Helper Functions ###########################################
+########################################### Utils Functions ###########################################
    
 def independent_meas_linear_fit(n_param: int, x: npt.ArrayLike, y: npt.ArrayLike, y_error: npt.ArrayLike) -> Tuple[NDAfloat, NDAfloat, NDAfloat, float]:
     """Apply linear least sq fit to the given data
@@ -146,3 +146,19 @@ def residue_plot(xlabel: str, ylabel: str, x: npt.ArrayLike, y: npt.ArrayLike, y
     plt.ylabel(ylabel)
     plt.axhline(y = 0, linestyle = '--')
     plt.show()
+
+def mu_from_I_and_fbl(I: value_with_error, fbl: value_with_error) -> value_with_error:
+        mu_value = (I.value-1) / fbl.value + 1
+        mu_derivative_wrt_I = 1 / fbl.value
+        mu_derivative_wrt_fbl = (I.value-1) / (fbl.value ** 2)
+        mu_error = error_combination([mu_derivative_wrt_I, mu_derivative_wrt_fbl], [I.error, fbl.error])
+
+        return value_with_error("mu", mu_value, mu_error)
+
+def u_min_from_mu_max(mu: value_with_error) -> value_with_error:
+        u_value = math.sqrt(2 * (mu.value / math.sqrt(mu.value**2 - 1) - 1))
+        
+        u_derivative_wrt_mu = 1 / (u_value * ((mu.value**2 - 1) ** 1.5))
+        u_error = error_combination([u_derivative_wrt_mu], [mu.error])
+
+        return value_with_error("umin", u_value, u_error)
