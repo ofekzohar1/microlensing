@@ -32,7 +32,7 @@ class microlensing:
     def parabolic_fit(self, mid_range: float, range_len: float) -> Dict[str, value_with_error]:
         min_range, max_range = mid_range-range_len, mid_range+range_len
         data_cut = self.data[(self.data["JHD"]<=max_range) & (self.data["JHD"]>=min_range)]
-        a, std_a, est_for_x, chi = ms_utils.independent_meas_linear_fit(n_param=3, x=data_cut["JHD"]-min_range, y=data_cut["I"], y_error=data_cut["I_error"])
+        a, std_a, est_for_x, chi = ms_utils.independent_meas_linear_fit(n_param=3, x=data_cut["JHD"]-min_range, y=data_cut["I"], y_err=data_cut["I_error"])
 
         t0_par, Imax_par, umin_par = self._extract_parabolic_params(a, std_a, min_range)
         self.par_params["t0"] = t0_par
@@ -92,7 +92,7 @@ class microlensing:
         t0_list, Imax_list, umin_list = [], [], []
         for _ in range(iter):
             sample = data_cut.sample(n=len(data_cut), replace=True)
-            a, std_a, _, _ = ms_utils.independent_meas_linear_fit(n_param=3, x=sample["JHD"]-min_range, y=sample["I"], y_error=sample["I_error"])
+            a, std_a, _, _ = ms_utils.independent_meas_linear_fit(n_param=3, x=sample["JHD"]-min_range, y=sample["I"], y_err=sample["I_error"])
             t0_par, Imax_par, umin_par = self._extract_parabolic_params(a, std_a, min_range)
             t0_list.append(t0_par.value)
             Imax_list.append(Imax_par.value)

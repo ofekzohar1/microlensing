@@ -1,13 +1,16 @@
 import math
 import numpy as np
 import numpy.typing as npt
-from typing import List, Tuple
+from typing import Callable, Dict, List, Tuple
 import matplotlib.pyplot as plt
 from scipy.stats import norm
 
 NDAfloat = npt.NDArray[np.float_]
+TargetFunc = Callable[[List[float], npt.ArrayLike], npt.ArrayLike]
 
-########################################### Classes ###########################################
+#######################################################################################################
+############################################### Classes ###############################################
+#######################################################################################################
 
 class value_with_error:
     """The class represents a measured value and its error
@@ -33,10 +36,77 @@ class value_with_error:
     def __repr__(self) -> str:
         return str(self)
 
+class Param:
+    def __init__(self, name: str, min: float, max: float, n: int = 17) -> None: #n should be odd
+        self.name = name
+        self.min = min
+        self.max = max
+        self.n = n
+    
+    def range(self):
+        return np.linspace(self.min,self.max,num=self.n)
+    
+    def get_new_range(self, value):
+        width = (self.max-self.min) / (self.n-1)
+        #print (self, " | " ,value, " | ",  Param(max(value - width, self.min), min(value+width, self.max)))
+        return Param(self.name, max(value - width, self.min), min(value+width, self.max))
+        #return Param(value - width, value+width)
+    
+    def __str__(self):
+        return f"param {self.name}: min={self.min}, max={self.max}"
 
-########################################### Utils Functions ###########################################
-   
-def independent_meas_linear_fit(n_param: int, x: npt.ArrayLike, y: npt.ArrayLike, y_error: npt.ArrayLike) -> Tuple[NDAfloat, NDAfloat, NDAfloat, float]:
+class MeshgridChiMinNonLinearFit:
+    def __init__(self, x: npt.ArrayLike, y: npt.ArrayLike, y_err: npt.ArrayLike, target_func: TargetFunc):
+        self.x = x
+        self.y = y
+        self.y_err = y_err
+        self.target_func = target_func
+
+    def fit(self, init_params: List[Param], fixed_params: List[Param], res_chi: float = 0.00001):
+        min_chi = float('inf')
+        counter = 0
+        new_min_chi = 1000000000000000000000000
+        
+        all_chis = []
+        all_params_comb = []
+        curr_params = init_params
+        while (min_chi - new_min_chi) > res_chi:
+            min_chi = new_min_chi
+
+            curr_params,  chis , params_combinations = self._min_chi_on_params(curr_params, fixed_params)
+            all_params_comb.extend(params_combinations)
+            all_chis.extend(chis)
+            new_min_chi = min(chis)
+            min_param_comb = params_combinations[np.argmin(chis)]
+            thepupik = " ".join(str(s) for s in init_params)
+            #print(f"{counter} \n old chi: {min_chi} | new chi: {n_min_chi} | min_comb: {min_param_comb}\n param: {thepupik} \n")
+            
+            counter +=1
+
+        #print(f"finished!! chi: {n_min_chi} | min_comb: {min_param_comb} \n")
+        return all_chis, all_params_comb
+
+    def _min_chi_on_params(self, params: List[Param], fixed_params: List[Param]):
+        new_params = []  # list of new parameters range
+
+        fixed_params_dict = {param.name: param.min for param in fixed_params}
+
+        params_combinations = np.array(np.meshgrid(*[param.range() for param in params])).reshape(-1,len(params))
+        chis = [calc_chi_sq(self.x, self.y, self.y_err, {params[i].name: param for i, param in enumerate(comb)} | fixed_params_dict, self.target_func) for comb in params_combinations]
+
+        min_param_comb = params_combinations[np.argmin(chis)]
+        for i in range(len(min_param_comb)):
+            new_params.append(params[i].get_new_range(min_param_comb[i]))
+
+        return new_params, chis , params_combinations
+
+#######################################################################################################
+########################################## Utility Functions ##########################################
+#######################################################################################################
+
+########################################## Fit Functions ##########################################
+
+def independent_meas_linear_fit(n_param: int, x: npt.ArrayLike, y: npt.ArrayLike, y_err: npt.ArrayLike) -> Tuple[NDAfloat, NDAfloat, NDAfloat, float]:
     """Apply linear least sq fit to the given data
 
     Args:
@@ -56,7 +126,7 @@ def independent_meas_linear_fit(n_param: int, x: npt.ArrayLike, y: npt.ArrayLike
     for i in range(n_param):
         C = np.column_stack((C, x ** i))
 
-    var_y_inv = np.diag(1 / (y_error ** 2))         # V^-1 - the inv var matrix of y
+    var_y_inv = np.diag(1 / (y_err ** 2))         # V^-1 - the inv var matrix of y
     inter_res = C.T @ var_y_inv                     # intermediate result - C^T * V^-1
     var_param_est = np.linalg.inv(inter_res @ C)    # The params var matrix - (C^T * V^-1 * C)^-1
     pararm_est = var_param_est @ inter_res @ y      # The params vector - (C^T * V^-1 * C)^-1 * C^T * V^-1 * y
@@ -69,11 +139,34 @@ def independent_meas_linear_fit(n_param: int, x: npt.ArrayLike, y: npt.ArrayLike
     
     return pararm_est, np.diag(var_param_est) ** 0.5, y_est, chi_sq_red
 
+def do_func(params: Dict[str, float], x: npt.ArrayLike) -> npt.ArrayLike:
+    u_min = params["u_min"]
+    t0 = params["t0"]
+    tau = params["tau"]
+    f_bl = params["f_bl"]
+    u_t = np.sqrt(u_min ** 2 + ((x-t0)/tau) ** 2)
+    mu = (u_t**2 + 2) / (u_t * np.sqrt(u_t**2 + 4))
+    return f_bl * (mu - 1) + 1
+
+def calc_chi_sq(x: npt.ArrayLike, y: npt.ArrayLike, y_error: npt.ArrayLike, params: Dict[str, float], target_func: TargetFunc) -> float:
+    return sum_of_sq((target_func(params, x) - y) / y_error)
+
 def orderOfMagnitude(num: float) -> int:
     """Return the order of the given number"""
     if num == 0:
         return 0
     return math.floor(math.log(num, 10))
+
+def sum_of_sq(a: npt.ArrayLike) -> float:
+    """Calculate the sum of squares of the array elements
+
+    Args:
+        a (`ArrayLike`): The elements to be squared
+
+    Returns:
+        float: the sum of squares
+    """
+    return np.sum(np.array(a) ** 2)
 
 def sqrt_sum_of_sq(a: npt.ArrayLike) -> float:
     """Calculate the square root of the sum of squares of the array elements
@@ -84,7 +177,7 @@ def sqrt_sum_of_sq(a: npt.ArrayLike) -> float:
     Returns:
         float: square root of the sum of squares
     """
-    return np.sqrt(np.sum(np.array(a) ** 2))
+    return np.sqrt(sum_of_sq(a))
 
 def nsigma(expected: value_with_error, meas: value_with_error) -> float:
     """Calculate the n-sigma test between measured and expected values
