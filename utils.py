@@ -1,18 +1,24 @@
 import math
+import time
 import numpy as np
 import numpy.typing as npt
 from typing import Callable, Dict, List, Tuple
 import matplotlib.pyplot as plt
+import pandas as pd
 from scipy.stats import norm
+from consts import *
+
+############################################### Types ###############################################
 
 NDAfloat = npt.NDArray[np.float_]
-TargetFunc = Callable[[List[float], npt.ArrayLike], npt.ArrayLike]
+FloatDict = Dict[str, float]
+TargetFunc = Callable[[FloatDict, npt.ArrayLike], npt.ArrayLike]
 
 #######################################################################################################
 ############################################### Classes ###############################################
 #######################################################################################################
 
-class value_with_error:
+class ValueWithError:
     """The class represents a measured value and its error
 
     Attributes:
@@ -20,36 +26,51 @@ class value_with_error:
         value (`float`): The numerical value
         error (`float`): The numerical error
     """
-    def __init__(self,name: str, value: float, error: float) -> None:
+    def __init__(self,name: str, value: float, upper_error: float, lower_error: float = None) -> None:
         self.name = name
-        self.value = float(value)
-        self.error = float(error)
+        self.value = value
+        self.upper_error = upper_error
+        self.lower_error = lower_error if lower_error is not None else upper_error
 
     def __str__(self) -> str:
         # Calculate fixed point precision - 2 most significant digits of the error
-        order = orderOfMagnitude(self.error)
-        precision = max(np.abs(order) + 1, 3)  # No less than 3 digits...
+        precision = self._calc_precision()
 
         # Return in Physics lab representation
-        return f"{self.name}: {self.value:.{precision}f}\u00B1{self.error:.{precision}f}"
+        s = f"{self.name}: {self.str_value()}"
+        if f"{self.upper_error:.{precision}f}" == f"{self.lower_error:.{precision}f}":
+            s += f"\u00B1{self.upper_error:.{precision}f}"
+        else:
+            s += f"[-{self.lower_error:.{precision}f},+{self.upper_error:.{precision}f}]"
+        return s
+
+    def str_value(self) -> str:
+        return f"{self.value:.{self._calc_precision()}f}"
+
+    def _calc_precision(self) -> int:
+        # Calculate fixed point precision - 2 most significant digits of the error
+        order = max(orderOfMagnitude(self.upper_error), orderOfMagnitude(self.lower_error))
+        return max(np.abs(order) + 1, 3)  # No less than 3 digits...
+        
 
     def __repr__(self) -> str:
         return str(self)
 
-class Param:
-    def __init__(self, name: str, min: float, max: float, n: int = 17) -> None: #n should be odd
+ValErrDict = Dict[str, ValueWithError]
+class ParamRange:
+    def __init__(self, name: str, min: float, max: float, n_segments: int = 5) -> None: #n should be odd
         self.name = name
         self.min = min
         self.max = max
-        self.n = n
+        self.n_segments = n_segments
     
     def range(self):
-        return np.linspace(self.min,self.max,num=self.n)
+        return np.linspace(self.min,self.max,num=self.n_segments+1)
     
     def get_new_range(self, value):
-        width = (self.max-self.min) / (self.n-1)
+        width = (self.max-self.min) / self.n_segments
         #print (self, " | " ,value, " | ",  Param(max(value - width, self.min), min(value+width, self.max)))
-        return Param(self.name, max(value - width, self.min), min(value+width, self.max))
+        return ParamRange(self.name, max(value - width, self.min), min(value+width, self.max), self.n_segments)
         #return Param(value - width, value+width)
     
     def __str__(self):
@@ -61,44 +82,159 @@ class MeshgridChiMinNonLinearFit:
         self.y = y
         self.y_err = y_err
         self.target_func = target_func
+        self.df_params_for_c_and_e: pd.DataFrame = None
+        self.fit_params: ValErrDict = {}
+        self.fit_chi = -1.0
 
-    def fit(self, init_params: List[Param], fixed_params: List[Param], res_chi: float = 0.00001):
-        min_chi = float('inf')
+    def fit(self, init_params: List[ParamRange], fixed_params: FloatDict, res_chi: float = 0, max_iters: int = np.inf) -> Tuple[ValErrDict, float]:
+        fit_params, self.fit_chi, df_params_comb = self._meshgrid_fit(init_params=init_params, fixed_params=fixed_params, res_chi=res_chi, max_iters=max_iters)
+        self.df_params_for_c_and_e = self._chis_for_contours_and_errors(self.fit_chi, fit_params, fixed_params, df_params_comb)
+        self.fit_params = self._fit_params_errors(fit_params)
+
+        return self.fit_params, self.fit_chi
+
+    def _meshgrid_fit(self, init_params: List[ParamRange], fixed_params: FloatDict, res_chi: float = 0, max_iters: int = np.inf) -> Tuple[FloatDict, float, pd.DataFrame]:
+        min_chi, new_min_chi = float('inf'), float('inf')
         counter = 0
-        new_min_chi = 1000000000000000000000000
         
-        all_chis = []
-        all_params_comb = []
-        curr_params = init_params
-        while (min_chi - new_min_chi) > res_chi:
+        iter_df_list = []
+        col_names = [param.name for param in init_params]
+        
+        curr_params_range = init_params
+        min_params_comb = []
+        while (min_chi - new_min_chi) > res_chi or min_chi == float('inf'):
             min_chi = new_min_chi
+            min_params = {init_params[i].name: min_param for i, min_param in enumerate(min_params_comb)}
 
-            curr_params,  chis , params_combinations = self._min_chi_on_params(curr_params, fixed_params)
-            all_params_comb.extend(params_combinations)
-            all_chis.extend(chis)
-            new_min_chi = min(chis)
-            min_param_comb = params_combinations[np.argmin(chis)]
-            thepupik = " ".join(str(s) for s in init_params)
-            #print(f"{counter} \n old chi: {min_chi} | new chi: {n_min_chi} | min_comb: {min_param_comb}\n param: {thepupik} \n")
+            if counter >= max_iters:
+                break
+
+            chis, params_combinations = self._calc_chi_on_params_meshgrid(curr_params_range, fixed_params)
+
+            # Accumulate all chis and params combinations from all iterations
+            iter_df = pd.DataFrame(data=params_combinations, columns=col_names)
+            iter_df["chi"] = chis
+            iter_df_list.append(iter_df)
+
+            # Calc the current best params and set the params range for next iteration
+            min_chi_index = np.argmin(chis)
+            new_min_chi = chis[min_chi_index]
+            min_params_comb = params_combinations[min_chi_index]
+            curr_params_range = [curr_params_range[i].get_new_range(min_param) for i, min_param in enumerate(min_params_comb)]
+
+            # thepupik = " ".join(str(s) for s in init_params)
+            # print(f"{counter} \n old chi: {min_chi} | new chi: {n_min_chi} | min_comb: {min_param_comb}\n param: {thepupik} \n")
             
-            counter +=1
+            counter += 1
 
         #print(f"finished!! chi: {n_min_chi} | min_comb: {min_param_comb} \n")
-        return all_chis, all_params_comb
+        df_params_comb = pd.concat(iter_df_list, keys=range(len(iter_df_list)))
+        df_params_comb["delta_chi"] = df_params_comb["chi"] - min_chi
+        
+        return min_params, min_chi, df_params_comb        
 
-    def _min_chi_on_params(self, params: List[Param], fixed_params: List[Param]):
-        new_params = []  # list of new parameters range
+    def _calc_chi_on_params_meshgrid(self, params: List[ParamRange], fixed_params: FloatDict) -> Tuple[List[float], npt.ArrayLike]:
 
-        fixed_params_dict = {param.name: param.min for param in fixed_params}
+        # create a meshgrid of all possible params range combinations
+        params_combinations = np.array(np.meshgrid(*[param.range() for param in params])).T.reshape(-1,len(params))
 
-        params_combinations = np.array(np.meshgrid(*[param.range() for param in params])).reshape(-1,len(params))
-        chis = [calc_chi_sq(self.x, self.y, self.y_err, {params[i].name: param for i, param in enumerate(comb)} | fixed_params_dict, self.target_func) for comb in params_combinations]
+        start_time = time.time()
+        # Calculate the chi sq value for each combination
+        chis = []
+        for comb in params_combinations:
+            # Gather the param combination in a dictionary
+            comb_dict = {params[i].name: param for i, param in enumerate(comb)}
+            # Calc the chi sq value corresponding to the current param combination
+            chis.append(calc_chi_sq(self.x, self.y, self.y_err, comb_dict, fixed_params, self.target_func))
+        end_time = time.time()
 
-        min_param_comb = params_combinations[np.argmin(chis)]
-        for i in range(len(min_param_comb)):
-            new_params.append(params[i].get_new_range(min_param_comb[i]))
+        #print(f"{len(params_combinations)} combs took {end_time-start_time}")
+        return chis, params_combinations
 
-        return new_params, chis , params_combinations
+    def _fit_params_errors(self, fit_params: FloatDict, confidence_level: float = 68.3) -> ValErrDict:
+        df = self.df_params_for_c_and_e[self.df_params_for_c_and_e['delta_chi'] <= CONFIDENCE_TO_DELTA_CHI_BY_DDOF[1][confidence_level]]
+        df_max = df.max()
+        df_min = df.min()
+        
+        fit_params_with_errors: ValErrDict = {}
+        for name, val in fit_params.items():
+            upper_error = abs(df_max[name] - val)
+            lower_error = abs(val - df_min[name])
+            fit_params_with_errors[name] = ValueWithError(f"{name}_non_linear_{len(fit_params)}_params", val, upper_error, lower_error)
+
+        return fit_params_with_errors
+
+    def plot_fit(self, params: FloatDict):
+        f_x = self.target_func(params, self.x)
+        fit_plot(xlabel=TIME, ylabel=I_VAL, x=self.x, y=self.y, y_error=self.y_err, y_est=f_x)
+        residue_plot(xlabel=TIME, ylabel=I_VAL, x=self.x, y=self.y, y_error=self.y_err, y_est=f_x)
+
+    def plot_2d_contours(self, x_param_name: str, y_param_name: str):
+        if self.df_params_for_c_and_e is None:
+            print("You must fit before plotting contours!")
+            return
+
+        print(f'{x_param_name} vs. {y_param_name} effect on Goodness of Fit (chi)')
+        levels = list(CONFIDENCE_TO_DELTA_CHI_BY_DDOF[2].values())[:3]
+
+        if len(self.fit_params) > 2:
+            cond = [True] * len(self.df_params_for_c_and_e)
+            for name, val in self.fit_params.items():
+                if name != x_param_name and name != y_param_name:
+                    cond = np.bitwise_and(cond, self.df_params_for_c_and_e[name] == val.value)
+            df_x_y_params = self.df_params_for_c_and_e[cond]
+        else:
+            df_x_y_params = self.df_params_for_c_and_e
+        
+        #cond = delta_chis < np.max(levels) * 2
+        #iter = delta_chis[cond].idxmax()[0]+1
+        #param_x_iter, param_y_iter, delta_chis_iter = param_x[iter], param_y[iter], delta_chis[iter]
+        x_param = df_x_y_params[x_param_name]
+        y_param = df_x_y_params[y_param_name]
+        delta_chis = df_x_y_params["delta_chi"]
+        
+        fig, ax2 = plt.subplots()
+        cs = ax2.tricontour(x_param, y_param, delta_chis, levels=levels, linewidths=0.5,colors=('red',  'green', 'orange'))
+        ax2.clabel(cs, inline=True, fontsize=10)
+
+        # Plot the best param center point
+        fit_x = self.fit_params[x_param_name]
+        fit_y = self.fit_params[y_param_name]
+        ax2.scatter(fit_x.value,fit_y.value)
+        ax2.annotate(f"({fit_x.str_value()},{fit_y.str_value()})", (fit_x.value,fit_y.value), textcoords="offset points", xytext=(0,10), ha='center')
+        
+        #ax2.scatter(x=param_x, y=param_y, c=delta_chis)
+        #cs = ax2.tricontour(u_min,T0,chis, levels=levels, linewidths=0.5,colors=('red',  'green', 'orange'))
+        #cntr2 = ax2.tricontourf(u_min,T0,chis, levels=levels, cmap='Blues')
+
+        #fig.colorbar(cntr2, ax=ax2)
+        #ax2.plot(u_min,T0, 'ko', ms=1)
+        #ax2.set_title(f'{x_param_name} vs. {y_param_name} effect on Goodness of Fit (chi)')
+        plt.xlabel(LABELS.get(x_param_name, x_param_name))
+        plt.ylabel(LABELS.get(y_param_name, y_param_name))
+        plt.grid()
+        plt.show()
+
+    def _chis_for_contours_and_errors(self, min_chi: float, fit_params: FloatDict, fixed_params: FloatDict, df_params: pd.DataFrame) -> pd.DataFrame:
+        delta_chi_bound = max(CONFIDENCE_TO_DELTA_CHI_BY_DDOF[2].values()) * 2
+
+        df_bound = df_params[df_params['delta_chi'] < delta_chi_bound]
+        param_upper_bounds = df_bound.max()
+        param_lower_bounds = df_bound.min()
+        params_range: List[ParamRange] = []
+        for name, val in fit_params.items():
+            upper_bound = abs(param_upper_bounds[name]-val)
+            lower_bound = abs(val-param_lower_bounds[name])
+            bound = max(upper_bound, lower_bound)
+            params_range.append(ParamRange(name, val-bound, val+bound, 20))
+
+        chis, params_combinations = self._calc_chi_on_params_meshgrid(params_range, fixed_params)
+        df_params_for_contour = pd.DataFrame(data=params_combinations, columns=fit_params.keys())
+        df_params_for_contour["delta_chi"] = np.array(chis) - min_chi
+        
+        return df_params_for_contour
+    
+
 
 #######################################################################################################
 ########################################## Utility Functions ##########################################
@@ -126,7 +262,7 @@ def independent_meas_linear_fit(n_param: int, x: npt.ArrayLike, y: npt.ArrayLike
     for i in range(n_param):
         C = np.column_stack((C, x ** i))
 
-    var_y_inv = np.diag(1 / (y_err ** 2))         # V^-1 - the inv var matrix of y
+    var_y_inv = np.diag(1 / (y_err ** 2))           # V^-1 - the inv var matrix of y
     inter_res = C.T @ var_y_inv                     # intermediate result - C^T * V^-1
     var_param_est = np.linalg.inv(inter_res @ C)    # The params var matrix - (C^T * V^-1 * C)^-1
     pararm_est = var_param_est @ inter_res @ y      # The params vector - (C^T * V^-1 * C)^-1 * C^T * V^-1 * y
@@ -139,17 +275,10 @@ def independent_meas_linear_fit(n_param: int, x: npt.ArrayLike, y: npt.ArrayLike
     
     return pararm_est, np.diag(var_param_est) ** 0.5, y_est, chi_sq_red
 
-def do_func(params: Dict[str, float], x: npt.ArrayLike) -> npt.ArrayLike:
-    u_min = params["u_min"]
-    t0 = params["t0"]
-    tau = params["tau"]
-    f_bl = params["f_bl"]
-    u_t = np.sqrt(u_min ** 2 + ((x-t0)/tau) ** 2)
-    mu = (u_t**2 + 2) / (u_t * np.sqrt(u_t**2 + 4))
-    return f_bl * (mu - 1) + 1
+########################################## Calculation Functions ##########################################
 
-def calc_chi_sq(x: npt.ArrayLike, y: npt.ArrayLike, y_error: npt.ArrayLike, params: Dict[str, float], target_func: TargetFunc) -> float:
-    return sum_of_sq((target_func(params, x) - y) / y_error)
+def calc_chi_sq(x: npt.ArrayLike, y: npt.ArrayLike, y_error: npt.ArrayLike, params: FloatDict, fixed_params: FloatDict, target_func: TargetFunc) -> float:
+    return sum_of_sq((target_func(params | fixed_params, x) - y) / y_error)
 
 def orderOfMagnitude(num: float) -> int:
     """Return the order of the given number"""
@@ -179,7 +308,7 @@ def sqrt_sum_of_sq(a: npt.ArrayLike) -> float:
     """
     return np.sqrt(sum_of_sq(a))
 
-def nsigma(expected: value_with_error, meas: value_with_error) -> float:
+def nsigma(expected: ValueWithError, meas: ValueWithError) -> float:
     """Calculate the n-sigma test between measured and expected values
 
     Args:
@@ -189,7 +318,12 @@ def nsigma(expected: value_with_error, meas: value_with_error) -> float:
     Returns:
         float: n-sigma test
     """
-    return np.abs(expected.value-meas.value) / sqrt_sum_of_sq([expected.error, meas.error])
+    if expected.value > meas.value:
+        return (expected.value-meas.value) / sqrt_sum_of_sq([expected.lower_error, meas.upper_error])
+    elif expected.value < meas.value:
+        return (meas.value-expected.value) / sqrt_sum_of_sq([expected.upper_error, meas.lower_error])
+    else:
+        return 0
 
 def error_combination(derivative: npt.ArrayLike, error: npt.ArrayLike) -> float:
     """Calculate the error combination of ind. errors
@@ -203,7 +337,27 @@ def error_combination(derivative: npt.ArrayLike, error: npt.ArrayLike) -> float:
     """
     return sqrt_sum_of_sq(np.multiply(derivative, error))
 
-def norm_hist(name: str, data: npt.ArrayLike) -> value_with_error:
+
+
+########################################## Plot & Print Functions ##########################################
+
+def fit_plot(xlabel: str, ylabel: str, x: npt.ArrayLike, y: npt.ArrayLike, y_error: npt.ArrayLike, y_est: npt.ArrayLike):
+    plt.errorbar(x=x, y=y, yerr=y_error, fmt='o', markersize=2)
+    plt.plot(x, y_est)
+    plt.xlabel(LABELS.get(xlabel, xlabel))
+    plt.ylabel(LABELS.get(ylabel, ylabel))
+    plt.grid()
+    plt.show()
+
+def residue_plot(xlabel: str, ylabel: str, x: npt.ArrayLike, y: npt.ArrayLike, y_error: npt.ArrayLike, y_est: npt.ArrayLike):
+    plt.errorbar(x=x, y=y-y_est, yerr=y_error, fmt='o', markersize=2)
+    plt.xlabel(LABELS.get(xlabel, xlabel))
+    plt.ylabel(f"Residue {LABELS.get(ylabel, ylabel)}")
+    plt.axhline(y = 0, linestyle = '--')
+    plt.grid()
+    plt.show()
+
+def norm_hist(name: str, data: npt.ArrayLike) -> ValueWithError:
     # Fit a normal distribution to the data:
     mu, std = norm.fit(data)
 
@@ -220,38 +374,23 @@ def norm_hist(name: str, data: npt.ArrayLike) -> value_with_error:
     plt.title(title)
     plt.show()
 
-    return value_with_error(name+"_hist", mu, std)
+    return ValueWithError(name+"_hist", mu, std)
 
-def bootstrap_compare(fit: value_with_error, hist: value_with_error) -> float:
-    res = np.abs(fit.value-hist.value) / fit.error
+def bootstrap_compare(fit: ValueWithError, hist: ValueWithError) -> float:
+    res = np.abs(fit.value-hist.value) / fit.upper_error
     
     print(fit)
     print(hist)
     print(f"bootstrap value comparison: {res}")
-    print(f"bootstrap error comparison: fit error order e{orderOfMagnitude(fit.error)}, bootstrap error order e{orderOfMagnitude(hist.error)}")
+    print(f"bootstrap error comparison: fit error order e{orderOfMagnitude(fit.upper_error)}, bootstrap error order e{orderOfMagnitude(hist.upper_error)}")
 
     return res
 
-def residue_plot(xlabel: str, ylabel: str, x: npt.ArrayLike, y: npt.ArrayLike, y_error: npt.ArrayLike, y_est: npt.ArrayLike):
-    plt.grid()
-    plt.errorbar(x=x, y=y-y_est, yerr=y_error, fmt='o', markersize=2)
-    plt.xlabel(xlabel)
-    plt.ylabel(ylabel)
-    plt.axhline(y = 0, linestyle = '--')
-    plt.show()
-
-def mu_from_I_and_fbl(I: value_with_error, fbl: value_with_error) -> value_with_error:
-        mu_value = (I.value-1) / fbl.value + 1
-        mu_derivative_wrt_I = 1 / fbl.value
-        mu_derivative_wrt_fbl = (I.value-1) / (fbl.value ** 2)
-        mu_error = error_combination([mu_derivative_wrt_I, mu_derivative_wrt_fbl], [I.error, fbl.error])
-
-        return value_with_error("mu", mu_value, mu_error)
-
-def u_min_from_mu_max(mu: value_with_error) -> value_with_error:
-        u_value = math.sqrt(2 * (mu.value / math.sqrt(mu.value**2 - 1) - 1))
-        
-        u_derivative_wrt_mu = 1 / (u_value * ((mu.value**2 - 1) ** 1.5))
-        u_error = error_combination([u_derivative_wrt_mu], [mu.error])
-
-        return value_with_error("umin", u_value, u_error)
+def calc_I(params: FloatDict, x: npt.ArrayLike) -> npt.ArrayLike:
+    u_min = params[U_MIN]
+    t0 = params[T0]
+    tau = params[TAU]
+    f_bl = params[F_BL]
+    u_t = np.sqrt(u_min ** 2 + ((x-t0)/tau) ** 2)
+    mu = (u_t**2 + 2) / (u_t * np.sqrt(u_t**2 + 4))
+    return f_bl * (mu - 1) + 1
