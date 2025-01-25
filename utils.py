@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from scipy.stats import norm
 from consts import *
+import datetime
 
 ############################################### Types ###############################################
 
@@ -58,7 +59,7 @@ class ValueWithError:
 
 ValErrDict = Dict[str, ValueWithError]
 class ParamRange:
-    def __init__(self, name: str, min: float, max: float, n_segments: int = 5) -> None: #n should be odd
+    def __init__(self, name: str, min: float, max: float, n_segments: int = 10) -> None: #n should be odd
         self.name = name
         self.min = min
         self.max = max
@@ -82,14 +83,14 @@ class MeshgridChiMinNonLinearFit:
         self.y = y
         self.y_err = y_err
         self.target_func = target_func
-        self.df_params_for_c_and_e: pd.DataFrame = None
+        self.df_params_comb: pd.DataFrame = None
         self.fit_params: ValErrDict = {}
         self.fit_chi = -1.0
 
     def fit(self, init_params: List[ParamRange], fixed_params: FloatDict, res_chi: float = 0, max_iters: int = np.inf) -> Tuple[ValErrDict, float]:
-        fit_params, self.fit_chi, df_params_comb = self._meshgrid_fit(init_params=init_params, fixed_params=fixed_params, res_chi=res_chi, max_iters=max_iters)
-        self.df_params_for_c_and_e = self._chis_for_contours_and_errors(self.fit_chi, fit_params, fixed_params, df_params_comb)
-        self.fit_params = self._fit_params_errors(fit_params)
+        fit_params, self.fit_chi, self.df_params_comb = self._meshgrid_fit(init_params=init_params, fixed_params=fixed_params, res_chi=res_chi, max_iters=max_iters)
+        self.fit_params = self._fit_params_errors(self.df_params_comb, fit_params)
+
 
         return self.fit_params, self.fit_chi
 
@@ -130,7 +131,7 @@ class MeshgridChiMinNonLinearFit:
         #print(f"finished!! chi: {n_min_chi} | min_comb: {min_param_comb} \n")
         df_params_comb = pd.concat(iter_df_list, keys=range(len(iter_df_list)))
         df_params_comb["delta_chi"] = df_params_comb["chi"] - min_chi
-        
+
         return min_params, min_chi, df_params_comb        
 
     def _calc_chi_on_params_meshgrid(self, params: List[ParamRange], fixed_params: FloatDict) -> Tuple[List[float], npt.ArrayLike]:
@@ -138,7 +139,6 @@ class MeshgridChiMinNonLinearFit:
         # create a meshgrid of all possible params range combinations
         params_combinations = np.array(np.meshgrid(*[param.range() for param in params])).T.reshape(-1,len(params))
 
-        start_time = time.time()
         # Calculate the chi sq value for each combination
         chis = []
         for comb in params_combinations:
@@ -146,13 +146,14 @@ class MeshgridChiMinNonLinearFit:
             comb_dict = {params[i].name: param for i, param in enumerate(comb)}
             # Calc the chi sq value corresponding to the current param combination
             chis.append(calc_chi_sq(self.x, self.y, self.y_err, comb_dict, fixed_params, self.target_func))
-        end_time = time.time()
 
         #print(f"{len(params_combinations)} combs took {end_time-start_time}")
         return chis, params_combinations
 
-    def _fit_params_errors(self, fit_params: FloatDict, confidence_level: float = 68.3) -> ValErrDict:
-        df = self.df_params_for_c_and_e[self.df_params_for_c_and_e['delta_chi'] <= CONFIDENCE_TO_DELTA_CHI_BY_DDOF[1][confidence_level]]
+    def _fit_params_errors(self, df_params_for_e: pd.DataFrame, fit_params: FloatDict, confidence_level: float = 68.3) -> ValErrDict:
+        chi_confidence = CONFIDENCE_TO_DELTA_CHI_BY_DDOF[1][confidence_level]
+        
+        df = df_params_for_e[(df_params_for_e['delta_chi'] <= chi_confidence * 1.2) & (df_params_for_e['delta_chi'] >= chi_confidence)]
         df_max = df.max()
         df_min = df.min()
         
@@ -164,27 +165,40 @@ class MeshgridChiMinNonLinearFit:
 
         return fit_params_with_errors
 
+    def _fit_params_errors2(self, df_params_for_e: pd.DataFrame, fit_params: FloatDict, min_chi: float, confidence_level: float = 68.3) -> ValErrDict:
+        df = df_params_for_e[df_params_for_e['delta_chi']>1]
+        fit_params_with_errors: ValErrDict = {}
+        for p_index, val in fit_params.items():
+            const_params = fit_params.copy()
+            const_params.pop(p_index)
+            temp_df=df
+            for key in const_params:    # make all other params const on their min chi value
+                temp_df=temp_df[temp_df[key]==const_params[key]] 
+            big_df = temp_df[temp_df[p_index]>fit_params[p_index]]
+            small_df = temp_df[temp_df[p_index]<fit_params[p_index]]
+            min_bound = small_df[small_df['chi']==small_df['chi'].min()].reset_index()[p_index][0]
+            max_bound = big_df[big_df['chi']==big_df['chi'].min()].reset_index()[p_index][0]
+            down_error = fit_params[p_index] - min_bound
+            up_error = max_bound - fit_params[p_index]
+            fit_params_with_errors[p_index] = ValueWithError(f"{p_index}_non_linear_{len(fit_params)}_params", val, up_error, down_error)
+
+        return fit_params_with_errors
+
     def plot_fit(self, params: FloatDict):
         f_x = self.target_func(params, self.x)
         fit_plot(xlabel=TIME, ylabel=I_VAL, x=self.x, y=self.y, y_error=self.y_err, y_est=f_x)
         residue_plot(xlabel=TIME, ylabel=I_VAL, x=self.x, y=self.y, y_error=self.y_err, y_est=f_x)
 
-    def plot_2d_contours(self, x_param_name: str, y_param_name: str):
-        if self.df_params_for_c_and_e is None:
+    def plot_2d_contours(self, x_param_name: str, y_param_name: str, fixed_params: FloatDict):
+        if self.df_params_comb is None:
             print("You must fit before plotting contours!")
             return
 
         print(f'{x_param_name} vs. {y_param_name} effect on Goodness of Fit (chi)')
         levels = list(CONFIDENCE_TO_DELTA_CHI_BY_DDOF[2].values())[:3]
 
-        if len(self.fit_params) > 2:
-            cond = [True] * len(self.df_params_for_c_and_e)
-            for name, val in self.fit_params.items():
-                if name != x_param_name and name != y_param_name:
-                    cond = np.bitwise_and(cond, self.df_params_for_c_and_e[name] == val.value)
-            df_x_y_params = self.df_params_for_c_and_e[cond]
-        else:
-            df_x_y_params = self.df_params_for_c_and_e
+        fixed_params = fixed_params | {name: param.value for name, param in self.fit_params.items() if name != x_param_name and name != y_param_name}
+        df_x_y_params = self._chis_for_contours(fit_params=[x_param_name, y_param_name], fixed_params=fixed_params)
         
         #cond = delta_chis < np.max(levels) * 2
         #iter = delta_chis[cond].idxmax()[0]+1
@@ -195,6 +209,17 @@ class MeshgridChiMinNonLinearFit:
         
         fig, ax2 = plt.subplots()
         cs = ax2.tricontour(x_param, y_param, delta_chis, levels=levels, linewidths=0.5,colors=('red',  'green', 'orange'))
+
+        # Fit figure to contours
+        contour_points = cs.collections[len(levels)-1].get_paths()[0].vertices
+        contour_x = contour_points[:,0]
+        contour_y = contour_points[:,1]
+        x_boundry = (max(contour_x) - min(contour_x)) / 10
+        y_boundry = (max(contour_y) - min(contour_y)) / 10
+        plt.xlim(min(contour_x)-x_boundry, max(contour_x)+x_boundry)
+        plt.ylim(min(contour_y)-y_boundry, max(contour_y)+y_boundry)
+
+        
         ax2.clabel(cs, inline=True, fontsize=10)
 
         # Plot the best param center point
@@ -215,22 +240,17 @@ class MeshgridChiMinNonLinearFit:
         plt.grid()
         plt.show()
 
-    def _chis_for_contours_and_errors(self, min_chi: float, fit_params: FloatDict, fixed_params: FloatDict, df_params: pd.DataFrame) -> pd.DataFrame:
-        delta_chi_bound = max(CONFIDENCE_TO_DELTA_CHI_BY_DDOF[2].values()) * 2
+    def _chis_for_contours(self, fit_params: List[str], fixed_params: FloatDict) -> pd.DataFrame:
+        delta_chi_bound = max(CONFIDENCE_TO_DELTA_CHI_BY_DDOF[2].values()) * 10
 
-        df_bound = df_params[df_params['delta_chi'] < delta_chi_bound]
+        df_bound = self.df_params_comb[self.df_params_comb['delta_chi'] < delta_chi_bound]
         param_upper_bounds = df_bound.max()
         param_lower_bounds = df_bound.min()
-        params_range: List[ParamRange] = []
-        for name, val in fit_params.items():
-            upper_bound = abs(param_upper_bounds[name]-val)
-            lower_bound = abs(val-param_lower_bounds[name])
-            bound = max(upper_bound, lower_bound)
-            params_range.append(ParamRange(name, val-bound, val+bound, 20))
+        params_range = [ParamRange(name, param_lower_bounds[name], param_upper_bounds[name], 50) for name in fit_params]
 
         chis, params_combinations = self._calc_chi_on_params_meshgrid(params_range, fixed_params)
-        df_params_for_contour = pd.DataFrame(data=params_combinations, columns=fit_params.keys())
-        df_params_for_contour["delta_chi"] = np.array(chis) - min_chi
+        df_params_for_contour = pd.DataFrame(data=params_combinations, columns=fit_params)
+        df_params_for_contour["delta_chi"] = np.array(chis) - self.fit_chi
         
         return df_params_for_contour
     
@@ -347,6 +367,9 @@ def fit_plot(xlabel: str, ylabel: str, x: npt.ArrayLike, y: npt.ArrayLike, y_err
     plt.xlabel(LABELS.get(xlabel, xlabel))
     plt.ylabel(LABELS.get(ylabel, ylabel))
     plt.grid()
+    plt.legend(["Fit line", "Observations"])
+    plt.tight_layout()
+    plt.savefig(f"fit_{xlabel}_vs_{ylabel}_{datetime.datetime.now()}.pdf")
     plt.show()
 
 def residue_plot(xlabel: str, ylabel: str, x: npt.ArrayLike, y: npt.ArrayLike, y_error: npt.ArrayLike, y_est: npt.ArrayLike):
@@ -355,6 +378,8 @@ def residue_plot(xlabel: str, ylabel: str, x: npt.ArrayLike, y: npt.ArrayLike, y
     plt.ylabel(f"Residue {LABELS.get(ylabel, ylabel)}")
     plt.axhline(y = 0, linestyle = '--')
     plt.grid()
+    plt.tight_layout()
+    plt.savefig(f"residue_{xlabel}_vs_{ylabel}_{datetime.datetime.now()}.pdf")
     plt.show()
 
 def norm_hist(name: str, data: npt.ArrayLike) -> ValueWithError:
@@ -363,15 +388,19 @@ def norm_hist(name: str, data: npt.ArrayLike) -> ValueWithError:
 
     # Plot the histogram
     plt.hist(data, bins=25, density=True, alpha=0.6, color='g', ec='black')
-    plt.xlabel(name)
+    plt.xlabel(LABELS.get(name, name))
+    plt.ylabel("Probability Density")
 
     # Plot the PDF.
     xmin, xmax = plt.xlim()
     x = np.linspace(xmin, xmax, 100)
     p = norm.pdf(x, mu, std)
     plt.plot(x, p, 'k', linewidth=2)
-    title = "Fit results: mu = %.4f,  std = %.4f" % (mu, std)
-    plt.title(title)
+    #title = "Fit results: mu = %.4f,  std = %.4f" % (mu, std)
+    #plt.title(title)
+    plt.legend([f"Normal Distribution", "Histogram"])
+    plt.tight_layout()
+    plt.savefig(f"hist_{name}_{datetime.datetime.now()}.pdf")
     plt.show()
 
     return ValueWithError(name+"_hist", mu, std)

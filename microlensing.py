@@ -1,15 +1,17 @@
+import datetime
+import json
 import time
 import numpy as np
 import numpy.typing as npt
 import pandas as pd
 from typing import Tuple, Dict, List
-import matplotlib.pyplot as plt
 import utils as ms_utils
 from utils import ValueWithError, FloatDict, ParamRange, ValErrDict
 from consts import *
 
 class Microlensing:
     def __init__(self, event_url: str) -> None:
+        self.event_url = event_url
         self.data = pd.read_csv(event_url+"/phot.dat", sep='\s+', comment='#', usecols=range(3), names=[JHD, "magnitude", "magnitude_error"])
         self.param_pd = pd.read_csv(event_url+"/params.dat", sep='\s+', comment='#', index_col=0, skiprows=8, names=["param", "value", "error"])
         self._ogle_process()
@@ -56,10 +58,10 @@ class Microlensing:
         print(self.par_params[T0])
         print(f"nsigma: {ms_utils.nsigma(self.ogle[T0], self.par_params[T0])}")
         print()
-        print(self.ogle['Imax'])
-        print(self.par_params['Imax'])
-        print(f"nsigma: {ms_utils.nsigma(self.ogle['Imax'], self.par_params['Imax'])}")
-        print()
+        # print(self.ogle['Imax'])
+        # print(self.par_params['Imax'])
+        # print(f"nsigma: {ms_utils.nsigma(self.ogle['Imax'], self.par_params['Imax'])}")
+        # print()
         print(self.ogle[U_MIN])
         print(self.par_params[U_MIN])
         print(f"nsigma: {ms_utils.nsigma(self.ogle[U_MIN], self.par_params[U_MIN])}")
@@ -69,7 +71,7 @@ class Microlensing:
 
     def non_linear_fit(self, init_params: List[ParamRange], fixed_params: FloatDict, res_chi: float = 0, max_iters: int = np.inf) -> ValErrDict:
         self.non_lin_fit = ms_utils.MeshgridChiMinNonLinearFit(self.data[JHD], self.data[I_VAL], self.data[I_ERROR], Microlensing.calc_I)
-        self.non_linear_params, fit_chi  = self.non_lin_fit.fit(init_params, fixed_params, max_iters=max_iters)
+        self.non_linear_params, fit_chi  = self.non_lin_fit.fit(init_params, fixed_params, max_iters=max_iters, res_chi=res_chi)
 
         # plot fit and residuals
         dict_fit_params = {name: param.value for name, param in self.non_linear_params.items()}
@@ -99,10 +101,10 @@ class Microlensing:
 
         return self.non_linear_params
 
-    def non_linear_contours(self, ParamList: List[str]):
+    def non_linear_contours(self, ParamList: List[str], fixed_params: FloatDict):
         for i, param1 in enumerate(ParamList):
             for param2 in ParamList[i+1:]:
-                self.non_lin_fit.plot_2d_contours(param1, param2)
+                self.non_lin_fit.plot_2d_contours(param1, param2, fixed_params)
             
 
     def _extract_parabolic_params(self, a: npt.ArrayLike, std_a: npt.ArrayLike, time_fix: float) -> Tuple[ValueWithError, ValueWithError, ValueWithError]:
@@ -140,6 +142,9 @@ class Microlensing:
                     param_list_values[name] = []
                 param_list_values[name].append(val)
 
+        with open(f"{len(init_params)}d_fit_{self.event_url}_{datetime.datetime.now()}.txt", 'w') as file:
+            file.write(json.dumps(param_list_values))
+
         histogram_dict: ValErrDict = {}
         for name, val_list in param_list_values.items():
             histogram_dict[name] = ms_utils.norm_hist(name, val_list)
@@ -164,15 +169,15 @@ class Microlensing:
             umin_list.append(umin_par.value)
 
         t0_hist = ms_utils.norm_hist(T0, t0_list)
-        Imax_hist = ms_utils.norm_hist(I_MAX, Imax_list)
+        #Imax_hist = ms_utils.norm_hist(I_MAX, Imax_list)
         umin_hist = ms_utils.norm_hist(U_MIN, umin_list)
 
         # compare to the original fit
         print("bootstrap:")
         ms_utils.bootstrap_compare(self.par_params[T0], t0_hist)
         print()
-        ms_utils.bootstrap_compare(self.par_params[I_MAX], Imax_hist)
-        print()
+        # ms_utils.bootstrap_compare(self.par_params[I_MAX], Imax_hist)
+        # print()
         ms_utils.bootstrap_compare(self.par_params[U_MIN], umin_hist)
 
     ########################################## Class Static Functions ##########################################
