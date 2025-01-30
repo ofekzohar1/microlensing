@@ -1,6 +1,8 @@
 import datetime
 import json
 import time
+from matplotlib import pyplot as plt
+from matplotlib.axes import Axes
 import numpy as np
 import numpy.typing as npt
 import pandas as pd
@@ -19,6 +21,8 @@ class Microlensing:
         self.par_params: ValErrDict = {}
         self.non_linear_params: ValErrDict = {}
         self.non_lin_fit: ms_utils.MeshgridChiMinNonLinearFit = None
+        self.lin_bootstrap: Dict[str, List[float]] = {}
+        self.non_linear_bootstrap: Dict[str, List[float]] = {}
             
     def _ogle_process(self) -> None:
         self.ogle = {name: ValueWithError(name, row["value"], row["error"]) for name, row in self.param_pd.iterrows()}
@@ -102,9 +106,23 @@ class Microlensing:
         return self.non_linear_params
 
     def non_linear_contours(self, ParamList: List[str], fixed_params: FloatDict):
-        for i, param1 in enumerate(ParamList):
-            for param2 in ParamList[i+1:]:
-                self.non_lin_fit.plot_2d_contours(param1, param2, fixed_params)
+        fig, axes = plt.subplots(len(ParamList)-1, len(ParamList)-1, figsize = (15,15))
+        for i, param1 in enumerate(ParamList[:-1]):
+            for j, param2 in enumerate(ParamList[i+1:]):
+                ax: Axes = axes[j+i,i]
+                self.non_lin_fit.plot_2d_contours(ax, param1, param2, fixed_params)
+                if i == 0:
+                    ax.set_ylabel(LABELS.get(param2, param2))
+            ax.set_xlabel(LABELS.get(param1, param1))
+        
+        for i in range(len(ParamList)-1):
+            for j in range(len(ParamList)-1):
+                if i > j:
+                    axes[j,i].remove()
+                    axes[j,i] = None
+        plt.tight_layout()
+        plt.savefig(f"contour_{len(ParamList)}D_{datetime.datetime.now()}.pdf")
+        plt.show()
             
 
     def _extract_parabolic_params(self, a: npt.ArrayLike, std_a: npt.ArrayLike, time_fix: float) -> Tuple[ValueWithError, ValueWithError, ValueWithError]:
@@ -129,7 +147,7 @@ class Microlensing:
         param_list_values: Dict[str, List[float]] = {}
         old_tick = 0
         for i in range(iter):
-            if i % 100 == 0:
+            if i % 10 == 0:
                 new_tick = time.time()
                 print(i, f"took {new_tick-old_tick}")
                 old_tick = new_tick
@@ -142,9 +160,8 @@ class Microlensing:
                     param_list_values[name] = []
                 param_list_values[name].append(val)
 
-        with open(f"{len(init_params)}d_fit_{self.event_url}_{datetime.datetime.now()}.txt", 'w') as file:
-            file.write(json.dumps(param_list_values))
-
+        self.non_linear_bootstrap = param_list_values
+        
         histogram_dict: ValErrDict = {}
         for name, val_list in param_list_values.items():
             histogram_dict[name] = ms_utils.norm_hist(name, val_list)
@@ -154,6 +171,18 @@ class Microlensing:
         for name, hist_val in histogram_dict.items():
             ms_utils.bootstrap_compare(self.non_linear_params[name], hist_val)
             print()
+
+        print("--- nsigma hist with ogle params ---")
+        for name, hist_val in histogram_dict.items():
+            ogle_param = self.ogle[name]
+            print(ogle_param)
+            print(hist_val)
+            print(f"nsigma: {ms_utils.nsigma(ogle_param, hist_val)}")
+            print()
+
+        print(param_list_values)
+        with open(f"{len(init_params)}d_fit_{datetime.datetime.now()}.txt", 'w') as file:
+            file.write(json.dumps(param_list_values))
 
     def bootstrap(self, mid_range: float, range_len: float, iter: int=10000) -> None:
         min_range, max_range = mid_range-range_len, mid_range+range_len
@@ -168,6 +197,8 @@ class Microlensing:
             Imax_list.append(Imax_par.value)
             umin_list.append(umin_par.value)
 
+        self.lin_bootstrap = {T0: t0_list, I_MAX: Imax_list, U_MIN: umin_list}
+
         t0_hist = ms_utils.norm_hist(T0, t0_list)
         #Imax_hist = ms_utils.norm_hist(I_MAX, Imax_list)
         umin_hist = ms_utils.norm_hist(U_MIN, umin_list)
@@ -179,6 +210,17 @@ class Microlensing:
         # ms_utils.bootstrap_compare(self.par_params[I_MAX], Imax_hist)
         # print()
         ms_utils.bootstrap_compare(self.par_params[U_MIN], umin_hist)
+
+        print("--- nsigma hist with ogle params ---")
+        print(self.ogle[T0])
+        print(t0_hist)
+        print(f"nsigma: {ms_utils.nsigma(umin_hist, self.ogle[U_MIN])}")
+        print()
+        print(self.ogle[U_MIN])
+        print(umin_hist)
+        print(f"nsigma: {ms_utils.nsigma(umin_hist, self.ogle[U_MIN])}")
+        print()
+
 
     ########################################## Class Static Functions ##########################################
         
