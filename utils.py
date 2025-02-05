@@ -44,14 +44,16 @@ class ValueWithError:
             s += f"\u00B1{self.upper_error:.{precision}f}"
         else:
             s += f"[-{self.lower_error:.{precision}f},+{self.upper_error:.{precision}f}]"
-        return s
+
+        relative_error = max(self.upper_error, self.lower_error) / self.value
+        return f"{s} (relative error: {relative_error * 100}%)"
 
     def str_value(self) -> str:
         return f"{self.value:.{self._calc_precision()}f}"
 
     def _calc_precision(self) -> int:
         # Calculate fixed point precision - 2 most significant digits of the error
-        order = max(orderOfMagnitude(self.upper_error), orderOfMagnitude(self.lower_error))
+        order = min(orderOfMagnitude(self.upper_error), orderOfMagnitude(self.lower_error))
         return max(np.abs(order) + 1, 2)  # No less than 2 digits...
         
 
@@ -93,8 +95,8 @@ class MeshgridChiMinNonLinearFit:
 
     def fit(self, init_params: List[ParamRange], fixed_params: FloatDict, res_chi: float = 0, max_iters: int = np.inf) -> Tuple[ValErrDict, float]:
         fit_params, self.fit_chi, self.df_params_comb = self._meshgrid_fit(init_params=init_params, fixed_params=fixed_params, res_chi=res_chi, max_iters=max_iters)
-        self.fit_params = self._fit_params_errors2(self.df_params_comb, fit_params)
-
+        #self.fit_params = self._fit_params_errors2(self.df_params_comb, fit_params)
+        self.fit_params = self._fit_params_errors3(init_params, fit_params, fixed_params)
 
         return self.fit_params, self.fit_chi
 
@@ -173,16 +175,49 @@ class MeshgridChiMinNonLinearFit:
         df = df_params_for_e[df_params_for_e['delta_chi'] >= 1]
         fit_params_with_errors: ValErrDict = {}
         for p_index, val in fit_params.items():
+            const_params = fit_params.copy()
+            const_params.pop(p_index)
             temp_df=df
+            for key in const_params:    # make all other params const on their min chi value
+                temp_df=temp_df[temp_df[key]==const_params[key]] 
             big_df = temp_df[temp_df[p_index]>=fit_params[p_index]]
             small_df = temp_df[temp_df[p_index]<=fit_params[p_index]]
             min_bound = small_df[small_df['delta_chi']==small_df['delta_chi'].min()].reset_index()[p_index][0]
-            print(small_df['delta_chi'].min())
+            print(small_df[small_df['delta_chi']==small_df['delta_chi'].min()])
             max_bound = big_df[big_df['delta_chi']==big_df['delta_chi'].min()].reset_index()[p_index][0]
-            print(big_df['delta_chi'].min())
+            print(big_df[big_df['delta_chi']==big_df['delta_chi'].min()])
             down_error = fit_params[p_index] - min_bound
             up_error = max_bound - fit_params[p_index]
             fit_params_with_errors[p_index] = ValueWithError(f"{p_index}_non_linear_{len(fit_params)}_params", val, up_error, down_error)
+
+        return fit_params_with_errors
+
+    def _fit_params_errors3(self, init_params: List[ParamRange], fit_params: FloatDict, fixed_params: FloatDict) -> ValErrDict:
+        fit_params_with_errors: ValErrDict = {}
+        for param in init_params:
+            name = param.name
+            param_cp = ParamRange(name, param.min, param.max, 2000)
+            const_params = fit_params.copy()
+            const_params.pop(name)
+            chis, combs = self._calc_chi_on_params_meshgrid([param_cp], const_params | fixed_params)
+
+            df = pd.DataFrame(data=combs, columns=[name])
+            df["chi"] = chis
+            df['delta_chi'] = df["chi"] - self.fit_chi
+            df_params_for_e = df[df['delta_chi'] >= 1]
+            
+            big_df = df_params_for_e[df_params_for_e[name]>=fit_params[name]]
+            small_df = df_params_for_e[df_params_for_e[name]<=fit_params[name]]
+            min_bound = small_df[small_df['delta_chi']==small_df['delta_chi'].min()].reset_index()[name].min()
+            print(small_df[small_df['delta_chi']==small_df['delta_chi'].min()])
+            max_bound = big_df[big_df['delta_chi']==big_df['delta_chi'].min()].reset_index()[name].min()
+            print(big_df[big_df['delta_chi']==big_df['delta_chi'].min()])
+            max_bound = fit_params[name] if np.isnan(max_bound) else max_bound
+            min_bound = fit_params[name] if np.isnan(min_bound) else min_bound
+            print(min_bound, max_bound)
+            down_error = fit_params[name] - min_bound
+            up_error = max_bound - fit_params[name]
+            fit_params_with_errors[name] = ValueWithError(f"{name}_non_linear_{len(fit_params)}_params", fit_params[name], up_error, down_error)
 
         return fit_params_with_errors
 
@@ -407,16 +442,20 @@ def norm_hist(name: str, data: npt.ArrayLike) -> ValueWithError:
 
     return ValueWithError(name+"_hist", mu, std)
 
-def bootstrap_compare(fit: ValueWithError, hist: ValueWithError) -> float:
-    res = np.abs(fit.value-hist.value) / fit.value
-    
-    print(fit)
-    print(hist)
-    print(f"bootstrap value comparison: {res}")
-    print(f"bootstrap error comparison: fit error order e{orderOfMagnitude(fit.upper_error)}, bootstrap error order e{orderOfMagnitude(hist.upper_error)}")
-    print(f"Nsigma sanity check: {nsigma(fit, hist)}")
+def bootstrap_compare(fit_dict: ValErrDict, hist_dict: ValErrDict):
+    print("bootstrap compare:")
 
-    return res
+    for name, fit in fit_dict.items():
+        hist = hist_dict[name]
+        divisor = fit.value if name != T0 or fit.value == np.floor(fit.value) else (fit.value - np.floor(fit.value))
+        res = np.abs(fit.value-hist.value) / divisor
+        
+        print(fit)
+        print(hist)
+        print(f"bootstrap value comparison: {res}")
+        print(f"bootstrap error comparison: fit error order e{orderOfMagnitude(fit.upper_error)}, bootstrap error order e{orderOfMagnitude(hist.upper_error)}")
+        print(f"Nsigma sanity check: {nsigma(fit, hist)}")
+        print()
 
 def calc_I(params: FloatDict, x: npt.ArrayLike) -> npt.ArrayLike:
     u_min = params[U_MIN]

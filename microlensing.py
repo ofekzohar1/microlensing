@@ -109,7 +109,7 @@ class Microlensing:
         fig, axes = plt.subplots(len(ParamList)-1, len(ParamList)-1, figsize = (15,15))
         for i, param1 in enumerate(ParamList[:-1]):
             for j, param2 in enumerate(ParamList[i+1:]):
-                ax: Axes = axes[j+i,i]
+                ax: Axes = axes[j+i,i] if len(ParamList) > 2 else axes
                 self.non_lin_fit.plot_2d_contours(ax, param1, param2, fixed_params)
                 if i == 0:
                     ax.set_ylabel(LABELS.get(param2, param2))
@@ -144,33 +144,31 @@ class Microlensing:
         return t0_par, Imax_par, umin_par
 
     def non_lin_bootstrap(self, init_params: List[ParamRange], fixed_params: FloatDict, res_chi: float = 0, max_mesh_iters: int = np.inf, iter: int=10000) -> None:
-        param_list_values: Dict[str, List[float]] = {}
+        self.non_linear_bootstrap: Dict[str, List[float]] = {}
         old_tick = 0
         for i in range(iter):
             if i % 10 == 0:
                 new_tick = time.time()
                 print(i, f"took {new_tick-old_tick}")
                 old_tick = new_tick
+            if i % 100 == 0:
+                with open(f"{len(init_params)}d_fit_{datetime.datetime.now()}.txt", 'w') as file:
+                    file.write(json.dumps(self.non_linear_bootstrap))
 
             sample = self.data.sample(n=len(self.data), replace=True)
             non_lin_fit_iter = ms_utils.MeshgridChiMinNonLinearFit(sample[JHD], sample[I_VAL], sample[I_ERROR], Microlensing.calc_I)
             fit_params, _, _ = non_lin_fit_iter._meshgrid_fit(init_params, fixed_params, res_chi, max_mesh_iters)
             for name, val in fit_params.items():
-                if name not in param_list_values:
-                    param_list_values[name] = []
-                param_list_values[name].append(val)
-
-        self.non_linear_bootstrap = param_list_values
+                if name not in self.non_linear_bootstrap:
+                    self.non_linear_bootstrap[name] = []
+                self.non_linear_bootstrap[name].append(val)
         
         histogram_dict: ValErrDict = {}
-        for name, val_list in param_list_values.items():
+        for name, val_list in self.non_linear_bootstrap.items():
             histogram_dict[name] = ms_utils.norm_hist(name, val_list)
 
         # compare to the original fit
-        print("bootstrap:")
-        for name, hist_val in histogram_dict.items():
-            ms_utils.bootstrap_compare(self.non_linear_params[name], hist_val)
-            print()
+        ms_utils.bootstrap_compare(self.non_linear_params, histogram_dict)
 
         print("--- nsigma hist with ogle params ---")
         for name, hist_val in histogram_dict.items():
@@ -180,9 +178,9 @@ class Microlensing:
             print(f"nsigma: {ms_utils.nsigma(ogle_param, hist_val)}")
             print()
 
-        print(param_list_values)
+        print(self.non_linear_bootstrap)
         with open(f"{len(init_params)}d_fit_{datetime.datetime.now()}.txt", 'w') as file:
-            file.write(json.dumps(param_list_values))
+            file.write(json.dumps(self.non_linear_bootstrap))
 
     def bootstrap(self, mid_range: float, range_len: float, iter: int=10000) -> None:
         min_range, max_range = mid_range-range_len, mid_range+range_len
@@ -204,12 +202,7 @@ class Microlensing:
         umin_hist = ms_utils.norm_hist(U_MIN, umin_list)
 
         # compare to the original fit
-        print("bootstrap:")
-        ms_utils.bootstrap_compare(self.par_params[T0], t0_hist)
-        print()
-        # ms_utils.bootstrap_compare(self.par_params[I_MAX], Imax_hist)
-        # print()
-        ms_utils.bootstrap_compare(self.par_params[U_MIN], umin_hist)
+        ms_utils.bootstrap_compare(self.par_params, {T0: t0_hist, U_MIN: umin_hist})
 
         print("--- nsigma hist with ogle params ---")
         print(self.ogle[T0])
